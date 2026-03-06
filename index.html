@@ -1,0 +1,478 @@
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import * as THREE from 'three';
+import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+import { Play, Trophy, RotateCcw, Lightbulb, AlertCircle } from 'lucide-react';
+
+// --- BASE DE DATOS MEJORADA (PAST CONTINUOUS VS PAST SIMPLE) ---
+// Ahora incluye pistas (hints) y la regla gramatical (rule) para retroalimentación
+const QUESTIONS = [
+  { 
+    sentence: "I ___ when the phone rang.", 
+    correct: "was sleeping", wrong: "slept",
+    hint: "Piensa en la acción larga que estaba en progreso antes de que el teléfono sonara.",
+    rule: "El 'Past Continuous' (was sleeping) se usa para acciones largas en progreso, mientras que el 'Past Simple' (rang) es la interrupción corta."
+  },
+  { 
+    sentence: "She was reading when he ___.", 
+    correct: "arrived", wrong: "was arriving",
+    hint: "La lectura ya estaba en progreso. ¿Qué tipo de acción es 'llegar'?",
+    rule: "Como 'She was reading' ya es la acción en progreso, 'arrived' es el 'Past Simple' que indica la acción corta que interrumpe."
+  },
+  { 
+    sentence: "We ___ TV when the power went out.", 
+    correct: "were watching", wrong: "watched",
+    hint: "La luz se fue de repente ('went out'). ¿Qué estaban haciendo ustedes en ese momento?",
+    rule: "Usamos 'were watching' (Past Continuous) para indicar que la acción de ver la TV estaba sucediendo justo en el momento del apagón."
+  },
+  { 
+    sentence: "He was driving when he ___ an accident.", 
+    correct: "saw", wrong: "was seeing",
+    hint: "Ver un accidente suele ser una acción instantánea, no un proceso largo.",
+    rule: "Los verbos de percepción como 'see' rara vez se usan en continuo. 'Saw' es el Past Simple que interrumpe el viaje en auto."
+  },
+  { 
+    sentence: "They ___ dinner when I called them.", 
+    correct: "were eating", wrong: "ate",
+    hint: "¿En qué estado se encontraba su cena cuando hiciste la llamada?",
+    rule: "Ellos ya habían empezado a cenar y no habían terminado. Es una acción en progreso, por lo tanto usamos 'were eating'."
+  },
+  { 
+    sentence: "I was showering when I ___ a noise.", 
+    correct: "heard", wrong: "was hearing",
+    hint: "Escuchar un ruido es un evento repentino.",
+    rule: "Al igual que 'see', el verbo 'hear' es repentino. Usamos 'heard' (Past Simple) como la interrupción de la ducha."
+  },
+  { 
+    sentence: "It ___ to rain while we were walking.", 
+    correct: "started", wrong: "was starting",
+    hint: "La palabra 'while' suele acompañar a la acción en progreso (were walking). ¿Qué pasa con la otra?",
+    rule: "El comienzo de la lluvia es un punto específico en el tiempo que interrumpe la caminata, por eso usamos 'started' (Past Simple)."
+  },
+  { 
+    sentence: "What ___ when the earthquake happened?", 
+    correct: "were you doing", wrong: "did you do",
+    hint: "Te están preguntando por tu actividad en el momento exacto del temblor.",
+    rule: "La pregunta busca saber qué acción tenías en progreso en el momento que empezó el terremoto: 'What were you doing?'."
+  },
+];
+
+const BLOCK_SPACING = 16; 
+
+export default function App() {
+  const [gameState, setGameState] = useState('menu'); // 'menu', 'playing', 'won'
+  const [score, setScore] = useState(0);
+  const [showHint, setShowHint] = useState(false);
+  const [feedback, setFeedback] = useState(null); // Guardará la regla gramatical al fallar
+  const canvasRef = useRef(null);
+  
+  // Referencias para comunicar React con el motor Three.js
+  const respawnRef = useRef(null);
+  const isRespawningRef = useRef(false);
+
+  // Generar un diseño aleatorio constante para las opciones correctas
+  const layout = useMemo(() => QUESTIONS.map(() => Math.random() > 0.5), []);
+  
+  useEffect(() => {
+    if (gameState !== 'playing' || !canvasRef.current) return;
+
+    // --- CONFIGURACIÓN DE LA ESCENA 3D (ESTILO NEÓN / SYNTHWAVE) ---
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color('#020617'); // Muy oscuro
+    scene.fog = new THREE.FogExp2('#020617', 0.025); // Niebla densa
+
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.set(0, 3, 0);
+
+    const renderer = new THREE.WebGLRenderer({ canvas: canvasRef.current, antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+
+    // --- CONTROLES DE RATÓN ---
+    const controls = new PointerLockControls(camera, document.body);
+    const onClick = () => {
+      // Solo bloquear si no estamos leyendo un feedback
+      if (!isRespawningRef.current) controls.lock();
+    };
+    document.addEventListener('click', onClick);
+
+    // --- ILUMINACIÓN NEÓN ---
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.3);
+    scene.add(ambientLight);
+    
+    const hemiLight = new THREE.HemisphereLight(0x0ea5e9, 0xf43f5e, 0.8); // Azul arriba, Rosa abajo
+    scene.add(hemiLight);
+
+    // Cuadrícula tipo ciberespacio en el fondo (el abismo)
+    const gridHelper = new THREE.GridHelper(400, 100, 0x0ea5e9, 0x082f49);
+    gridHelper.position.y = -20;
+    scene.add(gridHelper);
+
+    // --- GENERADOR DEL NIVEL ---
+    const colliders = [];
+    const animatedPlatforms = []; // Para darles un efecto flotante
+
+    function createTextSprite(text, color = '#ffffff', fontSize = 48, isLongText = false) {
+      const canvas = document.createElement('canvas');
+      canvas.width = isLongText ? 1024 : 512;
+      canvas.height = 128;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = color;
+      ctx.font = `bold ${fontSize}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      
+      // Sombra neón para el texto
+      ctx.shadowColor = color;
+      ctx.shadowBlur = 10;
+      ctx.fillText(text, canvas.width / 2, 64);
+      ctx.shadowBlur = 0; // Quitar sombra para el trazo
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = '#000000';
+      ctx.strokeText(text, canvas.width / 2, 64);
+
+      const texture = new THREE.CanvasTexture(canvas);
+      const material = new THREE.SpriteMaterial({ map: texture });
+      const sprite = new THREE.Sprite(material);
+      sprite.scale.set(isLongText ? 12 : 6, 1.5, 1);
+      return sprite;
+    }
+
+    QUESTIONS.forEach((q, i) => {
+      const zPos = -i * BLOCK_SPACING;
+
+      // 1. Plataforma principal (Punto de Control) - Verde Neón
+      const geoMain = new THREE.BoxGeometry(6, 0.8, 6);
+      const matMain = new THREE.MeshStandardMaterial({ 
+        color: 0x10b981, emissive: 0x059669, emissiveIntensity: 0.4, roughness: 0.2, metalness: 0.8 
+      });
+      const meshMain = new THREE.Mesh(geoMain, matMain);
+      meshMain.position.set(0, -0.5, zPos);
+      meshMain.userData = { baseY: -0.5 };
+      scene.add(meshMain);
+      animatedPlatforms.push(meshMain);
+      colliders.push({ minX: -3, maxX: 3, minZ: zPos - 3, maxZ: zPos + 3, top: 0 });
+      
+      const textQ = createTextSprite(q.sentence, '#38bdf8', 36, true);
+      textQ.position.set(0, 3.5, zPos - 3);
+      scene.add(textQ);
+
+      const isCorrectRight = layout[i];
+      const geoOpt = new THREE.BoxGeometry(4, 0.5, 3);
+      
+      // Estilo uniforme para opciones (Cian Neón) para que el jugador tenga que leer
+      const optMat = new THREE.MeshStandardMaterial({ 
+        color: 0x0ea5e9, emissive: 0x0284c7, emissiveIntensity: 0.5, transparent: true, opacity: 0.9 
+      });
+
+      // 2. Plataforma Izquierda
+      const meshLeft = new THREE.Mesh(geoOpt, optMat);
+      meshLeft.position.set(-3.5, -0.25, zPos - 8);
+      meshLeft.userData = { baseY: -0.25 };
+      scene.add(meshLeft);
+      animatedPlatforms.push(meshLeft);
+      
+      const textLeft = createTextSprite(isCorrectRight ? q.wrong : q.correct, '#ffffff', 32, false);
+      textLeft.position.set(-3.5, 0.8, zPos - 8);
+      scene.add(textLeft);
+
+      // 3. Plataforma Derecha
+      const meshRight = new THREE.Mesh(geoOpt, optMat);
+      meshRight.position.set(3.5, -0.25, zPos - 8);
+      meshRight.userData = { baseY: -0.25 };
+      scene.add(meshRight);
+      animatedPlatforms.push(meshRight);
+
+      const textRight = createTextSprite(!isCorrectRight ? q.wrong : q.correct, '#ffffff', 32, false);
+      textRight.position.set(3.5, 0.8, zPos - 8);
+      scene.add(textRight);
+
+      // Solo añadimos física a la plataforma correcta
+      const optX = isCorrectRight ? 3.5 : -3.5;
+      colliders.push({ 
+        minX: optX - 2, maxX: optX + 2, 
+        minZ: (zPos - 8) - 1.5, maxZ: (zPos - 8) + 1.5, 
+        top: 0 
+      });
+    });
+
+    // 4. Plataforma de Meta (Oro Neón)
+    const finalZ = -QUESTIONS.length * BLOCK_SPACING;
+    const geoFin = new THREE.BoxGeometry(10, 1, 10);
+    const matFin = new THREE.MeshStandardMaterial({ 
+      color: 0xf59e0b, emissive: 0xd97706, emissiveIntensity: 0.6, roughness: 0.1, metalness: 0.9 
+    });
+    const meshFin = new THREE.Mesh(geoFin, matFin);
+    meshFin.position.set(0, -0.5, finalZ);
+    scene.add(meshFin);
+    colliders.push({ minX: -5, maxX: 5, minZ: finalZ - 5, maxZ: finalZ + 5, top: 0 });
+
+    const textFin = createTextSprite('¡EXCELENTE!', '#fde047', 60);
+    textFin.position.set(0, 3, finalZ);
+    scene.add(textFin);
+
+    // --- CONTROLES DE TECLADO ---
+    const keys = { forward: false, backward: false, left: false, right: false, jump: false };
+    const onKeyDown = (e) => {
+      if (isRespawningRef.current) return; // Desactivar movimiento si está en pantalla de fallo
+      if (e.code === 'KeyW' || e.code === 'ArrowUp') keys.forward = true;
+      if (e.code === 'KeyS' || e.code === 'ArrowDown') keys.backward = true;
+      if (e.code === 'KeyA' || e.code === 'ArrowLeft') keys.left = true;
+      if (e.code === 'KeyD' || e.code === 'ArrowRight') keys.right = true;
+      if (e.code === 'Space') keys.jump = true;
+      if (e.code === 'KeyH') setShowHint(prev => !prev); // Tecla rápida para pistas
+    };
+    const onKeyUp = (e) => {
+      if (e.code === 'KeyW' || e.code === 'ArrowUp') keys.forward = false;
+      if (e.code === 'KeyS' || e.code === 'ArrowDown') keys.backward = false;
+      if (e.code === 'KeyA' || e.code === 'ArrowLeft') keys.left = false;
+      if (e.code === 'KeyD' || e.code === 'ArrowRight') keys.right = false;
+      if (e.code === 'Space') keys.jump = false;
+    };
+    document.addEventListener('keydown', onKeyDown);
+    document.addEventListener('keyup', onKeyUp);
+
+    // --- MOTOR DE FÍSICAS Y RENDERIZADO ---
+    let prevTime = performance.now();
+    const velocity = new THREE.Vector3();
+    const direction = new THREE.Vector3();
+    const speed = 40.0;
+    const jumpForce = 12.0;
+    const gravity = 30.0;
+    const playerHeight = 1.5;
+    const playerRadius = 0.5;
+    let lastCheckpoint = 0;
+    let animationFrameId;
+
+    // Función expuesta a React para reaparecer después de leer el error
+    respawnRef.current = () => {
+      const checkpointZ = -lastCheckpoint * BLOCK_SPACING;
+      camera.position.set(0, playerHeight + 2, checkpointZ);
+      velocity.set(0, 0, 0);
+      isRespawningRef.current = false;
+      setFeedback(null);
+      document.body.requestPointerLock?.();
+    };
+
+    function animate() {
+      animationFrameId = requestAnimationFrame(animate);
+      const time = performance.now();
+      const dt = Math.min((time - prevTime) / 1000, 0.1);
+      prevTime = time;
+
+      // Animar plataformas flotantes suavemente
+      animatedPlatforms.forEach((plat, idx) => {
+        plat.position.y = plat.userData.baseY + Math.sin(time * 0.002 + idx) * 0.15;
+      });
+
+      if (!isRespawningRef.current) {
+        // Gravedad
+        velocity.y -= gravity * dt;
+
+        // Fricción
+        velocity.x -= velocity.x * 10.0 * dt;
+        velocity.z -= velocity.z * 10.0 * dt;
+
+        // Dirección de movimiento
+        direction.z = Number(keys.forward) - Number(keys.backward);
+        direction.x = Number(keys.right) - Number(keys.left);
+        direction.normalize();
+
+        if (keys.forward || keys.backward) velocity.z -= direction.z * speed * dt;
+        if (keys.left || keys.right) velocity.x -= direction.x * speed * dt;
+
+        controls.moveRight(-velocity.x * dt);
+        controls.moveForward(-velocity.z * dt);
+        camera.position.y += velocity.y * dt;
+
+        // Colisiones AABB
+        let grounded = false;
+        const footY = camera.position.y - playerHeight;
+
+        for (const box of colliders) {
+          if (camera.position.x >= box.minX - playerRadius && camera.position.x <= box.maxX + playerRadius &&
+              camera.position.z >= box.minZ - playerRadius && camera.position.z <= box.maxZ + playerRadius) {
+              
+             if (footY <= box.top && footY > box.top - 1.5 && velocity.y <= 0) {
+                 camera.position.y = box.top + playerHeight;
+                 velocity.y = 0;
+                 grounded = true;
+                 break;
+             }
+          }
+        }
+
+        // Salto
+        if (grounded && keys.jump) {
+          velocity.y = jumpForce;
+        }
+
+        // Progreso
+        const currentProgress = Math.floor(Math.abs(camera.position.z) / BLOCK_SPACING);
+        if (currentProgress > lastCheckpoint && currentProgress <= QUESTIONS.length) {
+            lastCheckpoint = currentProgress;
+            setScore(currentProgress);
+            setShowHint(false); // Ocultar pista al avanzar
+            if (currentProgress === QUESTIONS.length) {
+                document.exitPointerLock();
+                setGameState('won');
+            }
+        }
+
+        // CAÍDA (Mecánica de Error y Aprendizaje)
+        if (camera.position.y < -15 && !isRespawningRef.current) {
+            isRespawningRef.current = true;
+            document.exitPointerLock();
+            // Mostrar la regla gramatical al jugador basada en el punto de control actual
+            setFeedback(QUESTIONS[lastCheckpoint].rule);
+        }
+      }
+
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    // Resize
+    const onResize = () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    };
+    window.addEventListener('resize', onResize);
+
+    return () => {
+      cancelAnimationFrame(animationFrameId);
+      document.removeEventListener('keydown', onKeyDown);
+      document.removeEventListener('keyup', onKeyUp);
+      document.removeEventListener('click', onClick);
+      window.removeEventListener('resize', onResize);
+      controls.dispose();
+      renderer.dispose();
+      scene.clear();
+    };
+
+  }, [gameState, layout]);
+
+  return (
+    <div className="w-full h-screen bg-slate-950 relative overflow-hidden font-sans">
+      
+      {/* PANTALLA DE MENÚ E INSTRUCCIONES */}
+      {gameState === 'menu' && (
+        <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-950/90 text-white backdrop-blur-md">
+          <h1 className="text-6xl font-black mb-4 text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-fuchsia-500 text-center px-4 drop-shadow-[0_0_15px_rgba(34,211,238,0.5)]">
+            Neon English Parkour
+          </h1>
+          <p className="text-lg max-w-2xl text-center mb-8 text-gray-200 bg-slate-900/60 p-8 rounded-2xl border border-cyan-500/30 shadow-[0_0_30px_rgba(6,182,212,0.15)]">
+            <span className="block text-3xl font-bold mb-3 text-cyan-400">Past Continuous vs Past Simple</span>
+            Aprende a identificar acciones largas en progreso y acciones cortas que las interrumpen.<br/><br/>
+            Lee la oración en el holograma azul y salta hacia la plataforma que la completa correctamente. <br/><br/>
+            Usa <span className="font-bold text-fuchsia-400">WASD</span> para moverte, el <span className="font-bold text-fuchsia-400">Ratón</span> para mirar, <span className="font-bold text-fuchsia-400">ESPACIO</span> para saltar, y presiona <span className="font-bold text-yellow-400">'H'</span> si necesitas una pista.
+          </p>
+          <button 
+            onClick={() => {
+              setGameState('playing');
+              document.body.requestPointerLock?.();
+            }}
+            className="flex items-center gap-2 px-10 py-4 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white rounded-full font-bold text-xl transition-all hover:scale-105 shadow-[0_0_20px_rgba(6,182,212,0.5)]"
+          >
+            <Play size={24} fill="currentColor" /> INICIAR SIMULACIÓN
+          </button>
+        </div>
+      )}
+
+      {/* PANTALLA DE FALLO (APRENDIZAJE) */}
+      {feedback && (
+        <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-red-950/90 text-white backdrop-blur-md">
+          <AlertCircle size={80} className="mb-4 text-red-500 drop-shadow-[0_0_10px_rgba(239,68,68,0.8)]" />
+          <h2 className="text-5xl font-black mb-6 text-red-400">¡Respuesta Incorrecta!</h2>
+          
+          <div className="max-w-3xl bg-black/50 p-8 rounded-2xl border border-red-500/30 text-center shadow-2xl mb-8">
+            <h3 className="text-xl font-bold text-gray-400 mb-2 uppercase tracking-widest">Regla Gramatical</h3>
+            <p className="text-2xl text-gray-100 leading-relaxed">{feedback}</p>
+          </div>
+
+          <button 
+            onClick={() => respawnRef.current && respawnRef.current()}
+            className="flex items-center gap-2 px-8 py-4 bg-white text-red-700 hover:bg-gray-200 rounded-full font-bold text-xl shadow-[0_0_20px_rgba(255,255,255,0.3)] transition-transform hover:scale-105"
+          >
+            <RotateCcw size={24} /> HE ENTENDIDO, INTENTAR DE NUEVO
+          </button>
+        </div>
+      )}
+
+      {/* PANTALLA DE VICTORIA */}
+      {gameState === 'won' && (
+        <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-emerald-950/90 text-white backdrop-blur-md">
+          <Trophy size={90} className="mb-4 text-emerald-400 drop-shadow-[0_0_15px_rgba(52,211,153,0.8)]" />
+          <h1 className="text-6xl font-black mb-4 drop-shadow-lg text-center text-emerald-300">¡Reto Superado!</h1>
+          <p className="text-2xl font-medium mb-8 text-center px-4 text-emerald-100">Dominas las interrupciones en el pasado como un profesional.</p>
+          <button 
+            onClick={() => {
+              setScore(0);
+              setGameState('menu');
+            }}
+            className="flex items-center gap-2 px-10 py-4 bg-emerald-500 hover:bg-emerald-400 text-white rounded-full font-bold text-xl shadow-[0_0_20px_rgba(16,185,129,0.5)] transition-transform hover:scale-105"
+          >
+            <RotateCcw size={24} /> JUGAR OTRA VEZ
+          </button>
+        </div>
+      )}
+
+      {/* INTERFAZ DE USUARIO (HUD) */}
+      {gameState === 'playing' && !feedback && (
+        <div className="absolute inset-0 z-10 pointer-events-none">
+          {/* Mirilla central */}
+          <div className="absolute inset-0 flex items-center justify-center">
+            <div className="w-1.5 h-1.5 bg-cyan-400 rounded-full shadow-[0_0_5px_rgba(34,211,238,1)]"></div>
+          </div>
+          
+          {/* Marcador de progreso */}
+          <div className="absolute top-6 right-6 bg-slate-900/80 text-white px-6 py-3 rounded-2xl backdrop-blur-md border border-cyan-500/30 shadow-[0_0_15px_rgba(6,182,212,0.2)]">
+            <p className="text-xs uppercase tracking-widest text-cyan-300 font-bold mb-1">Puntos de Control</p>
+            <p className="text-3xl font-black text-white">{score} <span className="text-gray-500 text-lg">/ {QUESTIONS.length}</span></p>
+          </div>
+
+          {/* Sistema de Pistas (Hints) */}
+          {score < QUESTIONS.length && (
+            <div className="absolute top-6 left-6 pointer-events-auto">
+              <button 
+                onClick={() => {
+                  setShowHint(!showHint);
+                  // Retomar foco del ratón tras clicar el botón
+                  document.body.requestPointerLock?.();
+                }}
+                className={`flex items-center gap-2 px-5 py-3 rounded-2xl font-bold backdrop-blur-md border transition-all ${
+                  showHint 
+                    ? 'bg-yellow-500/20 text-yellow-300 border-yellow-500/50 shadow-[0_0_15px_rgba(234,179,8,0.3)]' 
+                    : 'bg-slate-900/80 text-gray-400 border-gray-700 hover:text-white hover:border-cyan-500/50'
+                }`}
+              >
+                <Lightbulb size={20} className={showHint ? "animate-pulse" : ""} /> 
+                {showHint ? 'OCULTAR PISTA (H)' : 'VER PISTA (H)'}
+              </button>
+              
+              {showHint && (
+                <div className="mt-3 max-w-sm bg-slate-900/90 text-yellow-100 p-4 rounded-xl border border-yellow-500/30 backdrop-blur-md shadow-xl animate-in fade-in slide-in-from-top-2">
+                  <p className="text-sm font-medium leading-relaxed">{QUESTIONS[score]?.hint}</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Oración actual a completar */}
+          {score < QUESTIONS.length && (
+            <div className="absolute bottom-10 left-1/2 -translate-x-1/2 bg-slate-900/80 text-white px-10 py-4 rounded-3xl backdrop-blur-md shadow-[0_0_30px_rgba(6,182,212,0.15)] border border-cyan-500/30 max-w-3xl w-full text-center">
+              <p className="text-xs uppercase tracking-widest text-cyan-400 font-bold mb-2">Completa la Oración:</p>
+              <p className="text-2xl sm:text-4xl font-black tracking-wide">{QUESTIONS[score]?.sentence}</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* CANVAS DEL MOTOR 3D PURO */}
+      <canvas 
+        ref={canvasRef} 
+        className={`absolute inset-0 w-full h-full ${gameState === 'playing' ? 'z-0 block' : '-z-10 hidden'}`} 
+      />
+    </div>
+  );
+}
