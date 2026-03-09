@@ -1,10 +1,9 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import * as THREE from 'three';
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
-import { Play, Trophy, RotateCcw, Lightbulb, AlertCircle } from 'lucide-react';
+import { Play, Trophy, RotateCcw, Lightbulb, AlertCircle, CheckCircle2, Share2, Flag } from 'lucide-react';
 
-// --- BASE DE DATOS MEJORADA (PAST CONTINUOUS VS PAST SIMPLE) ---
-// Ahora incluye pistas (hints) y la regla gramatical (rule) para retroalimentación
+// --- BASE DE DATOS (PAST CONTINUOUS VS PAST SIMPLE) ---
 const QUESTIONS = [
   { 
     sentence: "I ___ when the phone rang.", 
@@ -59,26 +58,67 @@ const QUESTIONS = [
 const BLOCK_SPACING = 16; 
 
 export default function App() {
-  const [gameState, setGameState] = useState('menu'); // 'menu', 'playing', 'won'
+  const [gameState, setGameState] = useState('menu'); 
   const [score, setScore] = useState(0);
   const [showHint, setShowHint] = useState(false);
-  const [feedback, setFeedback] = useState(null); // Guardará la regla gramatical al fallar
-  const canvasRef = useRef(null);
+  const [feedback, setFeedback] = useState(null); 
+  const [isMobile, setIsMobile] = useState(false);
   
-  // Referencias para comunicar React con el motor Three.js
+  // Sistema de Notificaciones Premium (Toasts)
+  const [toast, setToast] = useState({ show: false, message: '', icon: null });
+  
+  const canvasRef = useRef(null);
   const respawnRef = useRef(null);
   const isRespawningRef = useRef(false);
+  const keysRef = useRef({ forward: false, backward: false, left: false, right: false, jump: false });
 
-  // Generar un diseño aleatorio constante para las opciones correctas
   const layout = useMemo(() => QUESTIONS.map(() => Math.random() > 0.5), []);
+
+  // Función global para mostrar notificaciones (Toasts)
+  const showToast = (message, icon = 'check') => {
+    setToast({ show: true, message, icon });
+    setTimeout(() => setToast(prev => ({ ...prev, show: false })), 3000);
+  };
+
+  // Escuchar cuando el jugador avanza de nivel para mostrar Toast
+  useEffect(() => {
+    if (score > 0 && score < QUESTIONS.length) {
+      showToast(`Punto de control ${score} alcanzado`, 'flag');
+    }
+  }, [score]);
+
+  // Compartir Victoria
+  const shareVictory = () => {
+    const text = `¡Acabo de superar el Neon English Parkour con un puntaje de ${QUESTIONS.length}/${QUESTIONS.length}! 🏆\n¿Puedes superar mi récord aprendiendo inglés?\n\n✨ Juega aquí:`;
+    const url = window.location.href;
+    
+    if (navigator.share) {
+      navigator.share({ title: 'Neon English Parkour', text: text, url: url })
+        .then(() => showToast("¡Gracias por compartir! 🌟", 'share'))
+        .catch(() => copyToClipboard(`${text} ${url}`));
+    } else {
+      copyToClipboard(`${text} ${url}`);
+    }
+  };
+
+  const copyToClipboard = (text) => {
+    navigator.clipboard.writeText(text)
+      .then(() => showToast("¡Copiado al portapapeles! 📋", 'check'))
+      .catch(() => showToast("Error al copiar", 'alert'));
+  };
+
+  useEffect(() => {
+    const checkMobile = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+    setIsMobile(checkMobile);
+  }, []);
   
   useEffect(() => {
     if (gameState !== 'playing' || !canvasRef.current) return;
 
-    // --- CONFIGURACIÓN DE LA ESCENA 3D (ESTILO NEÓN / SYNTHWAVE) ---
+    // --- ESCENA 3D ---
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color('#020617'); // Muy oscuro
-    scene.fog = new THREE.FogExp2('#020617', 0.025); // Niebla densa
+    scene.background = new THREE.Color('#0f172a'); // Slate 900
+    scene.fog = new THREE.FogExp2('#0f172a', 0.025); 
 
     const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
     camera.position.set(0, 3, 0);
@@ -87,29 +127,81 @@ export default function App() {
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.shadowMap.enabled = true;
 
-    // --- CONTROLES DE RATÓN ---
-    const controls = new PointerLockControls(camera, document.body);
-    const onClick = () => {
-      // Solo bloquear si no estamos leyendo un feedback
-      if (!isRespawningRef.current) controls.lock();
-    };
-    document.addEventListener('click', onClick);
+    // --- CONTROLES PC ---
+    let controls;
+    let onClickPc;
+    if (!isMobile) {
+      controls = new PointerLockControls(camera, document.body);
+      onClickPc = () => { if (!isRespawningRef.current) controls.lock(); };
+      document.addEventListener('click', onClickPc);
+    }
 
-    // --- ILUMINACIÓN NEÓN ---
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.3);
+    // --- ILUMINACIÓN ---
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
     scene.add(ambientLight);
-    
-    const hemiLight = new THREE.HemisphereLight(0x0ea5e9, 0xf43f5e, 0.8); // Azul arriba, Rosa abajo
+    const hemiLight = new THREE.HemisphereLight(0x818cf8, 0xe879f9, 0.8); // Indigo y Fuchsia
     scene.add(hemiLight);
 
-    // Cuadrícula tipo ciberespacio en el fondo (el abismo)
-    const gridHelper = new THREE.GridHelper(400, 100, 0x0ea5e9, 0x082f49);
+    const gridHelper = new THREE.GridHelper(400, 100, 0x6366f1, 0x1e1b4b);
     gridHelper.position.y = -20;
     scene.add(gridHelper);
 
+    // --- SISTEMA TÁCTIL (MIRAR) ---
+    const euler = new THREE.Euler(0, 0, 0, 'YXZ');
+    let lookTouchId = null;
+    let previousTouch = null;
+
+    const onTouchStart = (e) => {
+      if (e.target.closest('.mobile-control-btn') || e.target.closest('.ui-element')) return; 
+      e.preventDefault(); 
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        const touch = e.changedTouches[i];
+        if (lookTouchId === null) {
+          lookTouchId = touch.identifier;
+          previousTouch = { x: touch.pageX, y: touch.pageY };
+          break;
+        }
+      }
+    };
+
+    const onTouchMove = (e) => {
+      e.preventDefault(); 
+      if (lookTouchId === null) return;
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        const touch = e.changedTouches[i];
+        if (touch.identifier === lookTouchId) {
+          const movementX = touch.pageX - previousTouch.x;
+          const movementY = touch.pageY - previousTouch.y;
+          euler.setFromQuaternion(camera.quaternion);
+          euler.y -= movementX * 0.005;
+          euler.x -= movementY * 0.005;
+          euler.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, euler.x));
+          camera.quaternion.setFromEuler(euler);
+          previousTouch = { x: touch.pageX, y: touch.pageY };
+          break;
+        }
+      }
+    };
+
+    const onTouchEnd = (e) => {
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        if (e.changedTouches[i].identifier === lookTouchId) {
+          lookTouchId = null;
+          previousTouch = null;
+          break;
+        }
+      }
+    };
+
+    if (isMobile) {
+      document.addEventListener('touchstart', onTouchStart, { passive: false });
+      document.addEventListener('touchmove', onTouchMove, { passive: false });
+      document.addEventListener('touchend', onTouchEnd);
+    }
+
     // --- GENERADOR DEL NIVEL ---
     const colliders = [];
-    const animatedPlatforms = []; // Para darles un efecto flotante
+    const animatedPlatforms = []; 
 
     function createTextSprite(text, color = '#ffffff', fontSize = 48, isLongText = false) {
       const canvas = document.createElement('canvas');
@@ -120,12 +212,10 @@ export default function App() {
       ctx.font = `bold ${fontSize}px sans-serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      
-      // Sombra neón para el texto
       ctx.shadowColor = color;
-      ctx.shadowBlur = 10;
+      ctx.shadowBlur = 15;
       ctx.fillText(text, canvas.width / 2, 64);
-      ctx.shadowBlur = 0; // Quitar sombra para el trazo
+      ctx.shadowBlur = 0; 
       ctx.lineWidth = 4;
       ctx.strokeStyle = '#000000';
       ctx.strokeText(text, canvas.width / 2, 64);
@@ -140,10 +230,9 @@ export default function App() {
     QUESTIONS.forEach((q, i) => {
       const zPos = -i * BLOCK_SPACING;
 
-      // 1. Plataforma principal (Punto de Control) - Verde Neón
       const geoMain = new THREE.BoxGeometry(6, 0.8, 6);
       const matMain = new THREE.MeshStandardMaterial({ 
-        color: 0x10b981, emissive: 0x059669, emissiveIntensity: 0.4, roughness: 0.2, metalness: 0.8 
+        color: 0x8b5cf6, emissive: 0x6d28d9, emissiveIntensity: 0.4, roughness: 0.2, metalness: 0.8 
       });
       const meshMain = new THREE.Mesh(geoMain, matMain);
       meshMain.position.set(0, -0.5, zPos);
@@ -152,19 +241,16 @@ export default function App() {
       animatedPlatforms.push(meshMain);
       colliders.push({ minX: -3, maxX: 3, minZ: zPos - 3, maxZ: zPos + 3, top: 0 });
       
-      const textQ = createTextSprite(q.sentence, '#38bdf8', 36, true);
+      const textQ = createTextSprite(q.sentence, '#a78bfa', 36, true);
       textQ.position.set(0, 3.5, zPos - 3);
       scene.add(textQ);
 
       const isCorrectRight = layout[i];
       const geoOpt = new THREE.BoxGeometry(4, 0.5, 3);
-      
-      // Estilo uniforme para opciones (Cian Neón) para que el jugador tenga que leer
       const optMat = new THREE.MeshStandardMaterial({ 
-        color: 0x0ea5e9, emissive: 0x0284c7, emissiveIntensity: 0.5, transparent: true, opacity: 0.9 
+        color: 0x3b82f6, emissive: 0x2563eb, emissiveIntensity: 0.5, transparent: true, opacity: 0.8 
       });
 
-      // 2. Plataforma Izquierda
       const meshLeft = new THREE.Mesh(geoOpt, optMat);
       meshLeft.position.set(-3.5, -0.25, zPos - 8);
       meshLeft.userData = { baseY: -0.25 };
@@ -175,7 +261,6 @@ export default function App() {
       textLeft.position.set(-3.5, 0.8, zPos - 8);
       scene.add(textLeft);
 
-      // 3. Plataforma Derecha
       const meshRight = new THREE.Mesh(geoOpt, optMat);
       meshRight.position.set(3.5, -0.25, zPos - 8);
       meshRight.userData = { baseY: -0.25 };
@@ -186,7 +271,6 @@ export default function App() {
       textRight.position.set(3.5, 0.8, zPos - 8);
       scene.add(textRight);
 
-      // Solo añadimos física a la plataforma correcta
       const optX = isCorrectRight ? 3.5 : -3.5;
       colliders.push({ 
         minX: optX - 2, maxX: optX + 2, 
@@ -195,43 +279,47 @@ export default function App() {
       });
     });
 
-    // 4. Plataforma de Meta (Oro Neón)
     const finalZ = -QUESTIONS.length * BLOCK_SPACING;
     const geoFin = new THREE.BoxGeometry(10, 1, 10);
     const matFin = new THREE.MeshStandardMaterial({ 
-      color: 0xf59e0b, emissive: 0xd97706, emissiveIntensity: 0.6, roughness: 0.1, metalness: 0.9 
+      color: 0x10b981, emissive: 0x059669, emissiveIntensity: 0.6, roughness: 0.1, metalness: 0.9 
     });
     const meshFin = new THREE.Mesh(geoFin, matFin);
     meshFin.position.set(0, -0.5, finalZ);
     scene.add(meshFin);
     colliders.push({ minX: -5, maxX: 5, minZ: finalZ - 5, maxZ: finalZ + 5, top: 0 });
 
-    const textFin = createTextSprite('¡EXCELENTE!', '#fde047', 60);
+    const textFin = createTextSprite('¡EXCELENTE!', '#34d399', 60);
     textFin.position.set(0, 3, finalZ);
     scene.add(textFin);
 
     // --- CONTROLES DE TECLADO ---
-    const keys = { forward: false, backward: false, left: false, right: false, jump: false };
     const onKeyDown = (e) => {
-      if (isRespawningRef.current) return; // Desactivar movimiento si está en pantalla de fallo
-      if (e.code === 'KeyW' || e.code === 'ArrowUp') keys.forward = true;
-      if (e.code === 'KeyS' || e.code === 'ArrowDown') keys.backward = true;
-      if (e.code === 'KeyA' || e.code === 'ArrowLeft') keys.left = true;
-      if (e.code === 'KeyD' || e.code === 'ArrowRight') keys.right = true;
-      if (e.code === 'Space') keys.jump = true;
-      if (e.code === 'KeyH') setShowHint(prev => !prev); // Tecla rápida para pistas
+      if (isRespawningRef.current) return; 
+      if (e.code === 'KeyW' || e.code === 'ArrowUp') keysRef.current.forward = true;
+      if (e.code === 'KeyS' || e.code === 'ArrowDown') keysRef.current.backward = true;
+      if (e.code === 'KeyA' || e.code === 'ArrowLeft') keysRef.current.left = true;
+      if (e.code === 'KeyD' || e.code === 'ArrowRight') keysRef.current.right = true;
+      if (e.code === 'Space') keysRef.current.jump = true;
+      if (e.code === 'KeyH') {
+         setShowHint(prev => {
+            const newState = !prev;
+            if (newState) showToast("¡Pista revelada! 💡", 'hint');
+            return newState;
+         });
+      }
     };
     const onKeyUp = (e) => {
-      if (e.code === 'KeyW' || e.code === 'ArrowUp') keys.forward = false;
-      if (e.code === 'KeyS' || e.code === 'ArrowDown') keys.backward = false;
-      if (e.code === 'KeyA' || e.code === 'ArrowLeft') keys.left = false;
-      if (e.code === 'KeyD' || e.code === 'ArrowRight') keys.right = false;
-      if (e.code === 'Space') keys.jump = false;
+      if (e.code === 'KeyW' || e.code === 'ArrowUp') keysRef.current.forward = false;
+      if (e.code === 'KeyS' || e.code === 'ArrowDown') keysRef.current.backward = false;
+      if (e.code === 'KeyA' || e.code === 'ArrowLeft') keysRef.current.left = false;
+      if (e.code === 'KeyD' || e.code === 'ArrowRight') keysRef.current.right = false;
+      if (e.code === 'Space') keysRef.current.jump = false;
     };
     document.addEventListener('keydown', onKeyDown);
     document.addEventListener('keyup', onKeyUp);
 
-    // --- MOTOR DE FÍSICAS Y RENDERIZADO ---
+    // --- MOTOR DE FÍSICAS ---
     let prevTime = performance.now();
     const velocity = new THREE.Vector3();
     const direction = new THREE.Vector3();
@@ -243,14 +331,13 @@ export default function App() {
     let lastCheckpoint = 0;
     let animationFrameId;
 
-    // Función expuesta a React para reaparecer después de leer el error
     respawnRef.current = () => {
       const checkpointZ = -lastCheckpoint * BLOCK_SPACING;
       camera.position.set(0, playerHeight + 2, checkpointZ);
       velocity.set(0, 0, 0);
       isRespawningRef.current = false;
       setFeedback(null);
-      document.body.requestPointerLock?.();
+      if (!isMobile) document.body.requestPointerLock?.();
     };
 
     function animate() {
@@ -259,39 +346,41 @@ export default function App() {
       const dt = Math.min((time - prevTime) / 1000, 0.1);
       prevTime = time;
 
-      // Animar plataformas flotantes suavemente
       animatedPlatforms.forEach((plat, idx) => {
         plat.position.y = plat.userData.baseY + Math.sin(time * 0.002 + idx) * 0.15;
       });
 
       if (!isRespawningRef.current) {
-        // Gravedad
         velocity.y -= gravity * dt;
-
-        // Fricción
         velocity.x -= velocity.x * 10.0 * dt;
         velocity.z -= velocity.z * 10.0 * dt;
 
-        // Dirección de movimiento
-        direction.z = Number(keys.forward) - Number(keys.backward);
-        direction.x = Number(keys.right) - Number(keys.left);
+        direction.z = Number(keysRef.current.forward) - Number(keysRef.current.backward);
+        direction.x = Number(keysRef.current.right) - Number(keysRef.current.left);
         direction.normalize();
 
-        if (keys.forward || keys.backward) velocity.z -= direction.z * speed * dt;
-        if (keys.left || keys.right) velocity.x -= direction.x * speed * dt;
+        if (keysRef.current.forward || keysRef.current.backward) velocity.z -= direction.z * speed * dt;
+        if (keysRef.current.left || keysRef.current.right) velocity.x -= direction.x * speed * dt;
 
-        controls.moveRight(-velocity.x * dt);
-        controls.moveForward(-velocity.z * dt);
+        const moveR = -velocity.x * dt;
+        const moveF = -velocity.z * dt;
+        
+        const _vec = new THREE.Vector3();
+        _vec.setFromMatrixColumn(camera.matrix, 0);
+        camera.position.addScaledVector(_vec, moveR);
+        
+        _vec.setFromMatrixColumn(camera.matrix, 0);
+        _vec.crossVectors(camera.up, _vec);
+        camera.position.addScaledVector(_vec, moveF);
+
         camera.position.y += velocity.y * dt;
 
-        // Colisiones AABB
         let grounded = false;
         const footY = camera.position.y - playerHeight;
 
         for (const box of colliders) {
           if (camera.position.x >= box.minX - playerRadius && camera.position.x <= box.maxX + playerRadius &&
               camera.position.z >= box.minZ - playerRadius && camera.position.z <= box.maxZ + playerRadius) {
-              
              if (footY <= box.top && footY > box.top - 1.5 && velocity.y <= 0) {
                  camera.position.y = box.top + playerHeight;
                  velocity.y = 0;
@@ -301,37 +390,29 @@ export default function App() {
           }
         }
 
-        // Salto
-        if (grounded && keys.jump) {
-          velocity.y = jumpForce;
-        }
+        if (grounded && keysRef.current.jump) velocity.y = jumpForce;
 
-        // Progreso
         const currentProgress = Math.floor(Math.abs(camera.position.z) / BLOCK_SPACING);
         if (currentProgress > lastCheckpoint && currentProgress <= QUESTIONS.length) {
             lastCheckpoint = currentProgress;
             setScore(currentProgress);
-            setShowHint(false); // Ocultar pista al avanzar
+            setShowHint(false); 
             if (currentProgress === QUESTIONS.length) {
-                document.exitPointerLock();
+                if (!isMobile) document.exitPointerLock();
                 setGameState('won');
             }
         }
 
-        // CAÍDA (Mecánica de Error y Aprendizaje)
         if (camera.position.y < -15 && !isRespawningRef.current) {
             isRespawningRef.current = true;
-            document.exitPointerLock();
-            // Mostrar la regla gramatical al jugador basada en el punto de control actual
+            if (!isMobile) document.exitPointerLock();
             setFeedback(QUESTIONS[lastCheckpoint].rule);
         }
       }
-
       renderer.render(scene, camera);
     }
     animate();
 
-    // Resize
     const onResize = () => {
       camera.aspect = window.innerWidth / window.innerHeight;
       camera.updateProjectionMatrix();
@@ -343,126 +424,232 @@ export default function App() {
       cancelAnimationFrame(animationFrameId);
       document.removeEventListener('keydown', onKeyDown);
       document.removeEventListener('keyup', onKeyUp);
-      document.removeEventListener('click', onClick);
+      if (onClickPc) document.removeEventListener('click', onClickPc);
+      if (isMobile) {
+        document.removeEventListener('touchstart', onTouchStart);
+        document.removeEventListener('touchmove', onTouchMove);
+        document.removeEventListener('touchend', onTouchEnd);
+      }
       window.removeEventListener('resize', onResize);
-      controls.dispose();
+      if (controls) controls.dispose();
       renderer.dispose();
       scene.clear();
     };
 
-  }, [gameState, layout]);
+  }, [gameState, layout, isMobile]);
 
   return (
-    <div className="w-full h-screen bg-slate-950 relative overflow-hidden font-sans">
+    <div className="w-full h-screen bg-slate-900 relative overflow-hidden font-sans touch-none select-none text-slate-100">
       
+      {/* DECORATIVE BACKGROUND ORBS (Glassmorphism Vibe) */}
+      <div className="fixed inset-0 overflow-hidden pointer-events-none z-0">
+        <div className="absolute -top-[20%] -right-[10%] w-[50vw] h-[50vw] max-w-[600px] max-h-[600px] bg-indigo-500/20 rounded-full blur-[100px] animate-pulse" style={{ animationDuration: '8s' }}></div>
+        <div className="absolute top-[40%] -left-[10%] w-[40vw] h-[40vw] max-w-[500px] max-h-[500px] bg-fuchsia-500/20 rounded-full blur-[80px] animate-pulse" style={{ animationDuration: '6s', animationDelay: '2s' }}></div>
+      </div>
+
+      {/* GLOBAL TOAST NOTIFICATION */}
+      <div className={`fixed bottom-8 left-1/2 -translate-x-1/2 bg-white/10 backdrop-blur-xl text-white px-6 py-4 rounded-full border border-white/20 flex items-center gap-3 z-50 min-w-[280px] justify-center transition-all duration-500 ease-[cubic-bezier(0.68,-0.55,0.265,1.55)] shadow-[0_10px_40px_-10px_rgba(0,0,0,0.5)] ${toast.show ? 'translate-y-0 opacity-100' : 'translate-y-20 opacity-0 pointer-events-none'}`}>
+        {toast.icon === 'check' && <CheckCircle2 className="w-5 h-5 text-emerald-400" />}
+        {toast.icon === 'alert' && <AlertCircle className="w-5 h-5 text-red-400" />}
+        {toast.icon === 'hint' && <Lightbulb className="w-5 h-5 text-yellow-400" />}
+        {toast.icon === 'share' && <Share2 className="w-5 h-5 text-indigo-400" />}
+        {toast.icon === 'flag' && <Flag className="w-5 h-5 text-cyan-400" />}
+        <span className="text-sm font-semibold tracking-wide">{toast.message}</span>
+      </div>
+
       {/* PANTALLA DE MENÚ E INSTRUCCIONES */}
       {gameState === 'menu' && (
-        <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-950/90 text-white backdrop-blur-md">
-          <h1 className="text-6xl font-black mb-4 text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-fuchsia-500 text-center px-4 drop-shadow-[0_0_15px_rgba(34,211,238,0.5)]">
-            Neon English Parkour
-          </h1>
-          <p className="text-lg max-w-2xl text-center mb-8 text-gray-200 bg-slate-900/60 p-8 rounded-2xl border border-cyan-500/30 shadow-[0_0_30px_rgba(6,182,212,0.15)]">
-            <span className="block text-3xl font-bold mb-3 text-cyan-400">Past Continuous vs Past Simple</span>
-            Aprende a identificar acciones largas en progreso y acciones cortas que las interrumpen.<br/><br/>
-            Lee la oración en el holograma azul y salta hacia la plataforma que la completa correctamente. <br/><br/>
-            Usa <span className="font-bold text-fuchsia-400">WASD</span> para moverte, el <span className="font-bold text-fuchsia-400">Ratón</span> para mirar, <span className="font-bold text-fuchsia-400">ESPACIO</span> para saltar, y presiona <span className="font-bold text-yellow-400">'H'</span> si necesitas una pista.
-          </p>
-          <button 
-            onClick={() => {
-              setGameState('playing');
-              document.body.requestPointerLock?.();
-            }}
-            className="flex items-center gap-2 px-10 py-4 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white rounded-full font-bold text-xl transition-all hover:scale-105 shadow-[0_0_20px_rgba(6,182,212,0.5)]"
-          >
-            <Play size={24} fill="currentColor" /> INICIAR SIMULACIÓN
-          </button>
-        </div>
-      )}
+        <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-900/40 backdrop-blur-md">
+          <div className="relative z-10 flex flex-col items-center w-full max-w-3xl px-4">
+            
+            <div className="inline-flex items-center gap-2.5 px-5 py-2.5 rounded-full bg-white/5 backdrop-blur-md border border-white/10 mb-8 shadow-lg">
+              <span className="relative flex h-3 w-3">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-fuchsia-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-3 w-3 bg-fuchsia-500"></span>
+              </span>
+              <span className="text-sm font-medium text-indigo-100 tracking-wide">Plataforma Educativa 3D</span>
+            </div>
 
-      {/* PANTALLA DE FALLO (APRENDIZAJE) */}
-      {feedback && (
-        <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-red-950/90 text-white backdrop-blur-md">
-          <AlertCircle size={80} className="mb-4 text-red-500 drop-shadow-[0_0_10px_rgba(239,68,68,0.8)]" />
-          <h2 className="text-5xl font-black mb-6 text-red-400">¡Respuesta Incorrecta!</h2>
-          
-          <div className="max-w-3xl bg-black/50 p-8 rounded-2xl border border-red-500/30 text-center shadow-2xl mb-8">
-            <h3 className="text-xl font-bold text-gray-400 mb-2 uppercase tracking-widest">Regla Gramatical</h3>
-            <p className="text-2xl text-gray-100 leading-relaxed">{feedback}</p>
+            <h1 className="text-5xl md:text-7xl font-black mb-6 text-transparent bg-clip-text bg-gradient-to-r from-indigo-300 via-purple-300 to-fuchsia-300 text-center drop-shadow-sm">
+              English Parkour
+            </h1>
+            
+            <div className="text-base md:text-lg text-center mb-10 text-slate-200 bg-white/5 backdrop-blur-2xl p-8 rounded-[2rem] border border-white/10 shadow-2xl relative overflow-hidden group">
+              <div className="absolute inset-0 bg-gradient-to-br from-indigo-500/10 to-purple-500/10 opacity-0 group-hover:opacity-100 transition-opacity duration-500"></div>
+              <span className="block text-2xl md:text-3xl font-bold mb-4 text-indigo-300">Past Continuous vs Past Simple</span>
+              <p className="font-light leading-relaxed mb-6 text-slate-300">
+                Aprende a identificar acciones largas en progreso y acciones cortas que las interrumpen. Lee la oración en el holograma y salta hacia la respuesta correcta.
+              </p>
+              
+              <div className="flex flex-col md:flex-row items-center justify-center gap-4 text-sm font-medium text-slate-400 bg-black/20 rounded-2xl p-4">
+                <span>{isMobile ? "🎮 Joystick para moverte" : "⌨️ WASD para moverte"}</span>
+                <span className="hidden md:block w-1.5 h-1.5 rounded-full bg-slate-600"></span>
+                <span>{isMobile ? "👆 Desliza para mirar" : "🖱️ Ratón para mirar"}</span>
+              </div>
+            </div>
+
+            <button 
+              onClick={() => {
+                setGameState('playing');
+                if (!isMobile) document.body.requestPointerLock?.();
+              }}
+              className="relative overflow-hidden group flex items-center gap-3 px-10 py-5 bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-400 hover:to-purple-500 text-white rounded-full font-bold text-xl transition-all hover:scale-[1.02] active:scale-95 shadow-[0_10px_40px_-10px_rgba(99,102,241,0.6)] border border-white/10"
+            >
+              <div className="absolute inset-0 bg-white/20 translate-y-full group-hover:translate-y-0 transition-transform duration-300 ease-in-out"></div>
+              <Play size={24} fill="currentColor" className="relative z-10" /> 
+              <span className="relative z-10 tracking-wide">INICIAR SIMULACIÓN</span>
+            </button>
+
           </div>
-
-          <button 
-            onClick={() => respawnRef.current && respawnRef.current()}
-            className="flex items-center gap-2 px-8 py-4 bg-white text-red-700 hover:bg-gray-200 rounded-full font-bold text-xl shadow-[0_0_20px_rgba(255,255,255,0.3)] transition-transform hover:scale-105"
-          >
-            <RotateCcw size={24} /> HE ENTENDIDO, INTENTAR DE NUEVO
-          </button>
         </div>
       )}
 
-      {/* PANTALLA DE VICTORIA */}
+      {/* PANTALLA DE FALLO (APRENDIZAJE PREMIUM) */}
+      {feedback && (
+        <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-slate-900/60 backdrop-blur-xl p-4">
+          <div className="bg-white/5 border border-white/10 rounded-[2.5rem] p-8 md:p-12 max-w-2xl w-full shadow-2xl flex flex-col items-center text-center transform animate-in zoom-in-95 duration-300">
+            <div className="w-20 h-20 bg-rose-500/20 rounded-full flex items-center justify-center mb-6 border border-rose-500/30">
+              <AlertCircle size={40} className="text-rose-400" />
+            </div>
+            
+            <h2 className="text-3xl md:text-4xl font-bold mb-8 text-white">Refuerzo Gramatical</h2>
+            
+            <div className="bg-black/30 p-6 md:p-8 rounded-3xl border border-white/5 w-full mb-10">
+              <p className="text-xl md:text-2xl text-slate-200 leading-relaxed font-light">{feedback}</p>
+            </div>
+
+            <button 
+              onClick={() => respawnRef.current && respawnRef.current()}
+              className="flex items-center gap-3 px-10 py-5 bg-white text-slate-900 hover:bg-slate-200 rounded-full font-bold text-lg transition-all hover:scale-105 active:scale-95 shadow-xl"
+            >
+              <RotateCcw size={22} /> CONTINUAR INTENTANDO
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* PANTALLA DE VICTORIA (ESTILO ESPEJO DEL ALMA) */}
       {gameState === 'won' && (
-        <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-emerald-950/90 text-white backdrop-blur-md">
-          <Trophy size={90} className="mb-4 text-emerald-400 drop-shadow-[0_0_15px_rgba(52,211,153,0.8)]" />
-          <h1 className="text-6xl font-black mb-4 drop-shadow-lg text-center text-emerald-300">¡Reto Superado!</h1>
-          <p className="text-2xl font-medium mb-8 text-center px-4 text-emerald-100">Dominas las interrupciones en el pasado como un profesional.</p>
-          <button 
-            onClick={() => {
-              setScore(0);
-              setGameState('menu');
-            }}
-            className="flex items-center gap-2 px-10 py-4 bg-emerald-500 hover:bg-emerald-400 text-white rounded-full font-bold text-xl shadow-[0_0_20px_rgba(16,185,129,0.5)] transition-transform hover:scale-105"
-          >
-            <RotateCcw size={24} /> JUGAR OTRA VEZ
-          </button>
+        <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-900/80 backdrop-blur-xl p-4">
+          <div className="bg-gradient-to-b from-emerald-500/10 to-transparent border border-emerald-500/20 rounded-[3rem] p-10 md:p-16 max-w-3xl w-full shadow-2xl flex flex-col items-center text-center">
+            <div className="relative mb-8">
+              <div className="absolute inset-0 bg-emerald-400 blur-2xl opacity-30 rounded-full animate-pulse"></div>
+              <Trophy size={100} className="relative z-10 text-emerald-400 drop-shadow-lg" />
+            </div>
+            
+            <h1 className="text-5xl md:text-6xl font-black mb-6 text-white tracking-tight">¡Misión Cumplida!</h1>
+            <p className="text-xl md:text-2xl font-light mb-12 text-emerald-100/80">
+              Has dominado las reglas del <span className="font-semibold text-emerald-300">Past Continuous</span> y <span className="font-semibold text-emerald-300">Past Simple</span> con una puntuación perfecta.
+            </p>
+            
+            <div className="flex flex-col sm:flex-row gap-4 w-full justify-center">
+              <button 
+                onClick={() => {
+                  setScore(0);
+                  setGameState('menu');
+                }}
+                className="flex-1 sm:flex-none flex items-center justify-center gap-3 px-8 py-4 bg-white/10 hover:bg-white/20 border border-white/20 text-white rounded-2xl font-semibold text-lg transition-all active:scale-95"
+              >
+                <RotateCcw size={20} /> JUGAR DE NUEVO
+              </button>
+              
+              <button 
+                onClick={shareVictory}
+                className="flex-1 sm:flex-none flex items-center justify-center gap-3 px-8 py-4 bg-emerald-500 hover:bg-emerald-400 text-white rounded-2xl font-semibold text-lg shadow-[0_10px_20px_-10px_rgba(16,185,129,0.5)] transition-all active:scale-95"
+              >
+                <Share2 size={20} /> COMPARTIR LOGRO
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
-      {/* INTERFAZ DE USUARIO (HUD) */}
+      {/* INTERFAZ DE USUARIO DURANTE EL JUEGO (HUD PREMIUM) */}
       {gameState === 'playing' && !feedback && (
         <div className="absolute inset-0 z-10 pointer-events-none">
           {/* Mirilla central */}
-          <div className="absolute inset-0 flex items-center justify-center">
-            <div className="w-1.5 h-1.5 bg-cyan-400 rounded-full shadow-[0_0_5px_rgba(34,211,238,1)]"></div>
+          <div className="absolute inset-0 flex items-center justify-center hidden md:flex">
+            <div className="w-1.5 h-1.5 bg-white/80 rounded-full shadow-[0_0_10px_rgba(255,255,255,1)]"></div>
           </div>
           
-          {/* Marcador de progreso */}
-          <div className="absolute top-6 right-6 bg-slate-900/80 text-white px-6 py-3 rounded-2xl backdrop-blur-md border border-cyan-500/30 shadow-[0_0_15px_rgba(6,182,212,0.2)]">
-            <p className="text-xs uppercase tracking-widest text-cyan-300 font-bold mb-1">Puntos de Control</p>
-            <p className="text-3xl font-black text-white">{score} <span className="text-gray-500 text-lg">/ {QUESTIONS.length}</span></p>
+          {/* Marcador de progreso estilo Glass */}
+          <div className="absolute top-6 right-6 bg-slate-900/40 text-white px-6 py-4 rounded-3xl backdrop-blur-xl border border-white/10 shadow-2xl">
+            <p className="text-[10px] md:text-xs uppercase tracking-widest text-indigo-300 font-bold mb-1">Puntos de Control</p>
+            <div className="flex items-baseline gap-1">
+              <p className="text-3xl md:text-4xl font-black text-white">{score}</p>
+              <p className="text-slate-400 text-lg font-medium">/ {QUESTIONS.length}</p>
+            </div>
           </div>
 
-          {/* Sistema de Pistas (Hints) */}
+          {/* Sistema de Pistas */}
           {score < QUESTIONS.length && (
-            <div className="absolute top-6 left-6 pointer-events-auto">
+            <div className="absolute top-6 left-6 pointer-events-auto ui-element">
               <button 
                 onClick={() => {
-                  setShowHint(!showHint);
-                  // Retomar foco del ratón tras clicar el botón
-                  document.body.requestPointerLock?.();
+                  const newState = !showHint;
+                  setShowHint(newState);
+                  if (newState) showToast("Pista revelada en pantalla 💡", 'hint');
+                  if (!isMobile) document.body.requestPointerLock?.();
                 }}
-                className={`flex items-center gap-2 px-5 py-3 rounded-2xl font-bold backdrop-blur-md border transition-all ${
+                className={`flex items-center gap-3 px-5 py-4 rounded-3xl font-bold backdrop-blur-xl border transition-all shadow-xl ${
                   showHint 
-                    ? 'bg-yellow-500/20 text-yellow-300 border-yellow-500/50 shadow-[0_0_15px_rgba(234,179,8,0.3)]' 
-                    : 'bg-slate-900/80 text-gray-400 border-gray-700 hover:text-white hover:border-cyan-500/50'
+                    ? 'bg-yellow-500/10 text-yellow-300 border-yellow-500/30' 
+                    : 'bg-slate-900/40 text-slate-300 border-white/10 hover:bg-white/10 hover:text-white'
                 }`}
               >
-                <Lightbulb size={20} className={showHint ? "animate-pulse" : ""} /> 
-                {showHint ? 'OCULTAR PISTA (H)' : 'VER PISTA (H)'}
+                <Lightbulb size={22} className={showHint ? "animate-pulse" : ""} /> 
+                <span className="hidden md:inline text-sm tracking-wide">{showHint ? 'OCULTAR PISTA (H)' : 'NECESITO UNA PISTA (H)'}</span>
+                <span className="md:hidden text-sm">PISTA</span>
               </button>
               
               {showHint && (
-                <div className="mt-3 max-w-sm bg-slate-900/90 text-yellow-100 p-4 rounded-xl border border-yellow-500/30 backdrop-blur-md shadow-xl animate-in fade-in slide-in-from-top-2">
-                  <p className="text-sm font-medium leading-relaxed">{QUESTIONS[score]?.hint}</p>
+                <div className="mt-4 max-w-[85vw] md:max-w-md bg-slate-900/60 text-slate-200 p-5 rounded-3xl border border-white/10 backdrop-blur-2xl shadow-2xl animate-in slide-in-from-top-4 duration-300">
+                  <p className="text-sm md:text-base font-light leading-relaxed">{QUESTIONS[score]?.hint}</p>
                 </div>
               )}
             </div>
           )}
 
-          {/* Oración actual a completar */}
+          {/* Oración actual (Estilo Tarjeta Flotante) */}
           {score < QUESTIONS.length && (
-            <div className="absolute bottom-10 left-1/2 -translate-x-1/2 bg-slate-900/80 text-white px-10 py-4 rounded-3xl backdrop-blur-md shadow-[0_0_30px_rgba(6,182,212,0.15)] border border-cyan-500/30 max-w-3xl w-full text-center">
-              <p className="text-xs uppercase tracking-widest text-cyan-400 font-bold mb-2">Completa la Oración:</p>
-              <p className="text-2xl sm:text-4xl font-black tracking-wide">{QUESTIONS[score]?.sentence}</p>
+            <div className="absolute top-28 md:top-auto md:bottom-12 left-1/2 -translate-x-1/2 bg-slate-900/60 text-white px-8 py-5 md:px-12 md:py-6 rounded-[2rem] backdrop-blur-2xl shadow-[0_20px_40px_-15px_rgba(0,0,0,0.5)] border border-white/10 w-[90%] md:w-full md:max-w-3xl text-center">
+              <p className="text-[10px] md:text-xs uppercase tracking-widest text-indigo-300 font-bold mb-2">Completa la Oración:</p>
+              <p className="text-xl md:text-3xl lg:text-4xl font-bold tracking-tight text-slate-100">{QUESTIONS[score]?.sentence}</p>
+            </div>
+          )}
+
+          {/* CONTROLES TÁCTILES VIRTUALES (MÓVIL) - Refinados y limpios */}
+          {isMobile && (
+            <div className="absolute bottom-8 left-0 w-full px-8 flex justify-between items-end pointer-events-none z-20">
+              <div className="flex flex-col items-center gap-2 pointer-events-auto opacity-60 hover:opacity-100 transition-opacity">
+                <button className="mobile-control-btn w-16 h-16 bg-white/10 backdrop-blur-md border border-white/20 rounded-full flex items-center justify-center active:bg-white/30 text-white font-bold text-xl shadow-lg"
+                        onPointerDown={(e) => { e.preventDefault(); keysRef.current.forward = true; }}
+                        onPointerUp={(e) => { e.preventDefault(); keysRef.current.forward = false; }}
+                        onPointerOut={() => keysRef.current.forward = false}>↑</button>
+                <div className="flex gap-2">
+                  <button className="mobile-control-btn w-16 h-16 bg-white/10 backdrop-blur-md border border-white/20 rounded-full flex items-center justify-center active:bg-white/30 text-white font-bold text-xl shadow-lg"
+                          onPointerDown={(e) => { e.preventDefault(); keysRef.current.left = true; }}
+                          onPointerUp={(e) => { e.preventDefault(); keysRef.current.left = false; }}
+                          onPointerOut={() => keysRef.current.left = false}>←</button>
+                  <button className="mobile-control-btn w-16 h-16 bg-white/10 backdrop-blur-md border border-white/20 rounded-full flex items-center justify-center active:bg-white/30 text-white font-bold text-xl shadow-lg"
+                          onPointerDown={(e) => { e.preventDefault(); keysRef.current.backward = true; }}
+                          onPointerUp={(e) => { e.preventDefault(); keysRef.current.backward = false; }}
+                          onPointerOut={() => keysRef.current.backward = false}>↓</button>
+                  <button className="mobile-control-btn w-16 h-16 bg-white/10 backdrop-blur-md border border-white/20 rounded-full flex items-center justify-center active:bg-white/30 text-white font-bold text-xl shadow-lg"
+                          onPointerDown={(e) => { e.preventDefault(); keysRef.current.right = true; }}
+                          onPointerUp={(e) => { e.preventDefault(); keysRef.current.right = false; }}
+                          onPointerOut={() => keysRef.current.right = false}>→</button>
+                </div>
+              </div>
+
+              <div className="pointer-events-auto mb-2 opacity-80 hover:opacity-100 transition-opacity">
+                <button className="mobile-control-btn w-24 h-24 bg-indigo-500/40 backdrop-blur-md border border-indigo-400/50 rounded-full flex items-center justify-center active:bg-indigo-500/60 shadow-[0_0_20px_rgba(99,102,241,0.3)] text-white font-black tracking-widest text-sm"
+                        onPointerDown={(e) => { e.preventDefault(); keysRef.current.jump = true; }}
+                        onPointerUp={(e) => { e.preventDefault(); keysRef.current.jump = false; }}
+                        onPointerOut={() => keysRef.current.jump = false}>
+                  SALTO
+                </button>
+              </div>
             </div>
           )}
         </div>
